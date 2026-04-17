@@ -173,10 +173,15 @@ function createFallbackSymbol(kind: SymbolKind, x: number, y: number) {
   return group
 }
 
-async function createSymbol(kind: SymbolKind, x: number, y: number, circuitId: string) {
+async function createSymbolFromSvg(
+  kind: SymbolKind,
+  svgSource: string,
+  x: number,
+  y: number,
+  circuitId: string,
+) {
   try {
-    const svg = SYMBOL_SVG_LIBRARY[kind]
-    const parsed = await loadSVGFromString(svg)
+    const parsed = await loadSVGFromString(svgSource)
     const objects = parsed.objects.filter((obj): obj is NonNullable<typeof obj> => obj !== null)
     const group = new Group(objects, {
       left: x,
@@ -230,6 +235,9 @@ function App() {
   const [calcMaterial, setCalcMaterial] = useState<MaterialType>('copper')
   const [activeCircuit, setActiveCircuit] = useState(DEFAULT_CIRCUIT)
   const fileInputRef = useRef<HTMLInputElement | null>(null)
+  const symbolImportRef = useRef<HTMLInputElement | null>(null)
+  const [customSvgByKind, setCustomSvgByKind] = useState<Partial<Record<SymbolKind, string>>>({})
+  const [importKind, setImportKind] = useState<SymbolKind>('socket')
   const calculator = useMemo(() => new ElectricalCalculator(), [])
 
   const calcResult = useMemo(
@@ -392,8 +400,10 @@ function App() {
     const canvas = canvasRef.current
     if (!canvas) return
     const center = canvas.getCenterPoint()
-    const symbol = await createSymbol(
+    const svgSource = customSvgByKind[kind] ?? SYMBOL_SVG_LIBRARY[kind]
+    const symbol = await createSymbolFromSvg(
       kind,
+      svgSource,
       Math.round(center.x / GRID) * GRID,
       Math.round(center.y / GRID) * GRID,
       activeCircuit,
@@ -606,7 +616,11 @@ function App() {
       'symbolKind',
       'circuitId',
     ])
-    const blob = new Blob([JSON.stringify(json, null, 2)], { type: 'application/json' })
+    const payload = {
+      canvas: json,
+      customSvgByKind,
+    }
+    const blob = new Blob([JSON.stringify(payload, null, 2)], { type: 'application/json' })
     const url = URL.createObjectURL(blob)
     const a = document.createElement('a')
     a.href = url
@@ -621,7 +635,10 @@ function App() {
     if (!canvas) return
     const text = await file.text()
     const parsed = JSON.parse(text)
-    await canvas.loadFromJSON(parsed)
+    const canvasJson = parsed?.canvas ?? parsed
+    const importedCustom = (parsed?.customSvgByKind ?? {}) as Partial<Record<SymbolKind, string>>
+    await canvas.loadFromJSON(canvasJson)
+    setCustomSvgByKind(importedCustom)
     canvas.renderAll()
     setSelectedNodes([])
     setStatus('Projeto carregado com sucesso.')
@@ -638,14 +655,26 @@ function App() {
     setStatus('PDF exportado com sucesso.')
   }
 
+  const importCustomSymbol = async (file: File, kind: SymbolKind) => {
+    const text = await file.text()
+    if (!text.includes('<svg')) {
+      setStatus('Arquivo inválido: envie um SVG válido.')
+      return
+    }
+    setCustomSvgByKind((prev) => ({ ...prev, [kind]: text }))
+    setStatus(`SVG personalizado importado para ${MATERIAL_LABEL[kind]}.`)
+  }
+
   const onDropSymbol = async (event: React.DragEvent<HTMLDivElement>) => {
     event.preventDefault()
     const kind = event.dataTransfer.getData('symbol-kind') as SymbolKind
     const canvas = canvasRef.current
     if (!canvas || !kind) return
     const scenePoint = canvas.getScenePoint(event.nativeEvent)
-    const symbol = await createSymbol(
+    const svgSource = customSvgByKind[kind] ?? SYMBOL_SVG_LIBRARY[kind]
+    const symbol = await createSymbolFromSvg(
       kind,
+      svgSource,
       Math.round(scenePoint.x / GRID) * GRID,
       Math.round(scenePoint.y / GRID) * GRID,
       activeCircuit,
@@ -700,6 +729,26 @@ function App() {
               </button>
             ))}
           </div>
+          <div className="mt-3 rounded bg-slate-700/60 p-2">
+            <div className="mb-1 text-[11px] text-slate-300">Importar SVG personalizado</div>
+            <div className="flex gap-2">
+              <select
+                value={importKind}
+                onChange={(e) => setImportKind(e.target.value as SymbolKind)}
+                className="w-full rounded bg-slate-700 px-2 py-1 text-xs"
+              >
+                <option value="socket">Tomada</option>
+                <option value="switch">Interruptor</option>
+                <option value="lamp">Lâmpada</option>
+              </select>
+              <button
+                onClick={() => symbolImportRef.current?.click()}
+                className="rounded bg-sky-700 px-2 py-1 text-xs"
+              >
+                Importar
+              </button>
+            </div>
+          </div>
           <p className="mt-2 text-[11px] text-slate-400">
             Clique para inserir no centro, ou arraste para o canvas.
           </p>
@@ -749,6 +798,21 @@ function App() {
               await loadProjectFromFile(file)
             } catch {
               setStatus('Falha ao carregar JSON do projeto.')
+            } finally {
+              e.target.value = ''
+            }
+          }}
+        />
+        <input
+          ref={symbolImportRef}
+          type="file"
+          accept=".svg,image/svg+xml"
+          className="hidden"
+          onChange={async (e) => {
+            const file = e.target.files?.[0]
+            if (!file) return
+            try {
+              await importCustomSymbol(file, importKind)
             } finally {
               e.target.value = ''
             }

@@ -11,6 +11,7 @@ Base para clone do WOCA com:
 - Exportação de planta em PDF e materiais em JSON
 - Salvamento e abertura de projeto em JSON
 - Circuito ativo por símbolo e quadro de cargas em JSON
+- Importação de SVG personalizado para símbolos
 
 ## Rodar localmente
 
@@ -33,6 +34,7 @@ npm run dev
 - Exportação da lista de materiais para `lista-materiais.json`
 - Salvamento/carregamento do projeto (`woca-projeto.json`)
 - Exportação do quadro de cargas (`quadro-cargas.json`)
+- Importação de biblioteca SVG por tipo de símbolo (tomada/interruptor/lâmpada)
 
 ## Estrutura de fases (seu roteiro)
 
