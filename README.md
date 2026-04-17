@@ -5,6 +5,9 @@ Base para clone do WOCA com:
 - Tailwind CSS
 - Fabric.js (editor gráfico)
 - A* para roteamento de eletroduto evitando paredes
+- Pan/zoom e grid magnética (snap)
+- Paleta com arrastar e soltar
+- Calculadora elétrica NBR 5410 (base)
 - Exportação de planta em PDF e materiais em JSON
 
 ## Rodar localmente
@@ -17,9 +20,12 @@ npm run dev
 ## Funcionalidades já prontas
 
 - Grid estilo CAD (passo de 10 cm, equivalente lógico)
-- Ferramentas de inserção: `Tomada`, `Interruptor`, `Lâmpada`
+- Ferramentas de inserção: `Tomada`, `Interruptor`, `Lâmpada` (clique e drag-drop)
 - Ferramenta `Parede` com propriedade de obstáculo
 - Seleção de dois pontos elétricos e conexão automática via A*
+- Pan com `Alt + arrastar` e zoom no scroll do mouse
+- Snap de objetos na malha durante movimentação
+- Painel de cálculo para corrente, bitola, disjuntor e queda de tensão
 - Exportação do canvas para `planta-eletrica.pdf`
 - Exportação da lista de materiais para `lista-materiais.json`
 
@@ -34,8 +40,8 @@ npm run dev
 ## Próximos passos recomendados
 
 - Substituir símbolos provisórios por conversão real de `.dxf` do repositório `gutierrezps/simbolos-nbr-5444`
-- Implementar snap avançado e pan/zoom contínuo estilo CAD
-- Criar classe `ElectricalCalculator` com regras NBR 5410
+- Importar símbolos reais em SVG convertidos dos `.dxf` do NBR 5444
+- Ajustar tabela completa de capacidade de condução NBR 5410 por método/temperatura
 - Adicionar testes unitários para A* e cálculo elétrico
 
 ## Deploy no Vercel

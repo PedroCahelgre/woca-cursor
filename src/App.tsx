@@ -1,13 +1,20 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { Canvas, Circle, Group, Line, Rect, Text } from 'fabric'
 import jsPDF from 'jspdf'
+import {
+  ElectricalCalculator,
+  type InstallationMethod,
+  type MaterialType,
+} from './services/electricalCalculator'
 
-type Tool = 'select' | 'wall' | 'socket' | 'switch' | 'lamp' | 'connect'
+type Tool = 'select' | 'wall' | 'connect'
 type SymbolKind = 'socket' | 'switch' | 'lamp'
 type GridPoint = { x: number; y: number }
 
 const GRID = 40
 const WORKSPACE = 4000
+const CANVAS_WIDTH = 1800
+const CANVAS_HEIGHT = 1100
 const MATERIAL_LABEL: Record<SymbolKind, string> = {
   socket: 'Tomada 2P+T',
   switch: 'Interruptor simples',
@@ -171,13 +178,31 @@ function App() {
   const [status, setStatus] = useState('Editor pronto.')
   const [selectedNodes, setSelectedNodes] = useState<Group[]>([])
   const wallStart = useRef<{ x: number; y: number } | null>(null)
+  const dragging = useRef(false)
+  const lastPos = useRef({ x: 0, y: 0 })
+  const [zoomPercent, setZoomPercent] = useState(100)
+  const [calcWatts, setCalcWatts] = useState(1500)
+  const [calcDistance, setCalcDistance] = useState(24)
+  const [calcVoltage, setCalcVoltage] = useState(220)
+  const [calcMethod, setCalcMethod] = useState<InstallationMethod>('B1')
+  const [calcMaterial, setCalcMaterial] = useState<MaterialType>('copper')
+  const calculator = useMemo(() => new ElectricalCalculator(), [])
+
+  const calcResult = useMemo(
+    () =>
+      calculator.calculateFromPower({
+        powerWatts: calcWatts,
+        distanceMeters: calcDistance,
+        voltage: calcVoltage,
+        installationMethod: calcMethod,
+        material: calcMaterial,
+      }),
+    [calculator, calcDistance, calcMaterial, calcMethod, calcVoltage, calcWatts],
+  )
 
   const tools = useMemo(
     () => [
       { id: 'select' as Tool, label: 'Selecionar' },
-      { id: 'socket' as Tool, label: 'Tomada' },
-      { id: 'switch' as Tool, label: 'Interruptor' },
-      { id: 'lamp' as Tool, label: 'Lâmpada' },
       { id: 'wall' as Tool, label: 'Parede' },
       { id: 'connect' as Tool, label: 'Conectar A*' },
     ],
@@ -191,8 +216,8 @@ function App() {
   useEffect(() => {
     if (!canvasEl.current) return
     const canvas = new Canvas(canvasEl.current, {
-      width: window.innerWidth - 320,
-      height: window.innerHeight - 24,
+      width: CANVAS_WIDTH,
+      height: CANVAS_HEIGHT,
       backgroundColor: '#f8fafc',
       selection: true,
     })
@@ -218,26 +243,40 @@ function App() {
       )
     }
 
+    canvas.on('mouse:wheel', (opt) => {
+      const e = opt.e as WheelEvent
+      let zoom = canvas.getZoom()
+      zoom *= 0.999 ** e.deltaY
+      zoom = Math.min(3, Math.max(0.3, zoom))
+      const point = canvas.getScenePoint(e)
+      canvas.zoomToPoint(point, zoom)
+      setZoomPercent(Math.round(zoom * 100))
+      e.preventDefault()
+      e.stopPropagation()
+    })
+
     canvas.on('mouse:down', (evt) => {
+      const e = evt.e as MouseEvent
+      if (e.altKey || e.button === 1) {
+        dragging.current = true
+        canvas.selection = false
+        lastPos.current = { x: e.clientX, y: e.clientY }
+        return
+      }
+
       const pointer = canvas.getScenePoint(evt.e)
       if (!pointer) return
 
       const activeTool = toolRef.current
-      if (activeTool === 'socket' || activeTool === 'switch' || activeTool === 'lamp') {
-        const symbol = createSymbol(activeTool, pointer.x, pointer.y)
-        canvas.add(symbol)
-        canvas.setActiveObject(symbol)
-        setStatus(`${MATERIAL_LABEL[activeTool]} adicionada.`)
-        return
-      }
-
       if (activeTool === 'wall') {
         if (!wallStart.current) {
-          wallStart.current = { x: pointer.x, y: pointer.y }
+          wallStart.current = { x: Math.round(pointer.x / GRID) * GRID, y: Math.round(pointer.y / GRID) * GRID }
           setStatus('Ponto inicial da parede definido.')
           return
         }
-        const wall = new Line([wallStart.current.x, wallStart.current.y, pointer.x, pointer.y], {
+        const snapX = Math.round(pointer.x / GRID) * GRID
+        const snapY = Math.round(pointer.y / GRID) * GRID
+        const wall = new Line([wallStart.current.x, wallStart.current.y, snapX, snapY], {
           stroke: '#374151',
           strokeWidth: 6,
           selectable: true,
@@ -247,6 +286,31 @@ function App() {
         wallStart.current = null
         setStatus('Parede criada como obstáculo.')
       }
+    })
+
+    canvas.on('mouse:move', (evt) => {
+      if (!dragging.current) return
+      const e = evt.e as MouseEvent
+      const vpt = canvas.viewportTransform
+      if (!vpt) return
+      vpt[4] += e.clientX - lastPos.current.x
+      vpt[5] += e.clientY - lastPos.current.y
+      canvas.requestRenderAll()
+      lastPos.current = { x: e.clientX, y: e.clientY }
+    })
+
+    canvas.on('mouse:up', () => {
+      dragging.current = false
+      canvas.selection = toolRef.current === 'select'
+    })
+
+    canvas.on('object:moving', (evt) => {
+      const obj = evt.target
+      if (!obj || obj.get('evented') === false) return
+      obj.set({
+        left: Math.round((obj.left ?? 0) / GRID) * GRID,
+        top: Math.round((obj.top ?? 0) / GRID) * GRID,
+      })
     })
 
     return () => {
@@ -268,6 +332,17 @@ function App() {
     all.forEach((obj) => canvas.remove(obj))
     setSelectedNodes([])
     setStatus('Projeto limpo.')
+  }
+
+  const addSymbol = (kind: SymbolKind) => {
+    const canvas = canvasRef.current
+    if (!canvas) return
+    const center = canvas.getCenterPoint()
+    const symbol = createSymbol(kind, Math.round(center.x / GRID) * GRID, Math.round(center.y / GRID) * GRID)
+    canvas.add(symbol)
+    canvas.setActiveObject(symbol)
+    setStatus(`${MATERIAL_LABEL[kind]} adicionada.`)
+    canvas.requestRenderAll()
   }
 
   const selectNode = () => {
@@ -311,7 +386,7 @@ function App() {
 
     blocked.delete(key(start))
     blocked.delete(key(end))
-    const path = runAStar(start, end, blocked, WORKSPACE / GRID, WORKSPACE / GRID)
+    const path = runAStar(start, end, blocked, WORKSPACE / GRID + 1, WORKSPACE / GRID + 1)
 
     if (!path.length) {
       setStatus('Não foi possível encontrar rota sem cruzar paredes.')
@@ -367,7 +442,7 @@ function App() {
   const exportPdf = () => {
     const canvas = canvasRef.current
     if (!canvas) return
-    const image = canvas.toDataURL({ format: 'png', multiplier: 1 })
+    const image = canvas.toDataURL({ format: 'png', multiplier: 1.4 })
     const pdf = new jsPDF({ orientation: 'landscape', unit: 'px', format: [1400, 900] })
     pdf.text('WOCA Cursor Clone - Planta Elétrica', 24, 28)
     pdf.addImage(image, 'PNG', 20, 40, 1360, 840)
@@ -375,11 +450,28 @@ function App() {
     setStatus('PDF exportado com sucesso.')
   }
 
+  const onDropSymbol = (event: React.DragEvent<HTMLDivElement>) => {
+    event.preventDefault()
+    const kind = event.dataTransfer.getData('symbol-kind') as SymbolKind
+    const canvas = canvasRef.current
+    if (!canvas || !kind) return
+    const scenePoint = canvas.getScenePoint(event.nativeEvent)
+    const symbol = createSymbol(
+      kind,
+      Math.round(scenePoint.x / GRID) * GRID,
+      Math.round(scenePoint.y / GRID) * GRID,
+    )
+    canvas.add(symbol)
+    canvas.setActiveObject(symbol)
+    canvas.requestRenderAll()
+    setStatus(`${MATERIAL_LABEL[kind]} inserida via arrastar e soltar.`)
+  }
+
   return (
     <div className="flex h-screen w-screen gap-4 p-3 text-slate-100">
-      <aside className="w-72 rounded-xl bg-slate-900/90 p-4 shadow-xl">
+      <aside className="w-80 overflow-y-auto rounded-xl bg-slate-900/90 p-4 shadow-xl">
         <h1 className="mb-2 text-lg font-semibold">WOCA Clone (Base)</h1>
-        <p className="mb-4 text-xs text-slate-400">Grid 10cm | Fabric.js | A* para eletroduto</p>
+        <p className="mb-4 text-xs text-slate-400">Grid 10cm | Fabric.js | A* | Snap | Zoom</p>
 
         <div className="mb-4 grid grid-cols-2 gap-2">
           {tools.map((entry) => (
@@ -393,6 +485,26 @@ function App() {
               {entry.label}
             </button>
           ))}
+        </div>
+
+        <div className="mb-4 rounded-md bg-slate-800 p-3">
+          <h2 className="mb-2 text-sm font-semibold">Paleta de símbolos</h2>
+          <div className="grid grid-cols-3 gap-2">
+            {(['socket', 'switch', 'lamp'] as SymbolKind[]).map((kind) => (
+              <button
+                key={kind}
+                draggable
+                onDragStart={(event) => event.dataTransfer.setData('symbol-kind', kind)}
+                onClick={() => addSymbol(kind)}
+                className="rounded bg-slate-700 px-2 py-2 text-xs capitalize hover:bg-slate-600"
+              >
+                {MATERIAL_LABEL[kind].replace(' 2P+T', '')}
+              </button>
+            ))}
+          </div>
+          <p className="mt-2 text-[11px] text-slate-400">
+            Clique para inserir no centro, ou arraste para o canvas.
+          </p>
         </div>
 
         <div className="space-y-2">
@@ -414,12 +526,89 @@ function App() {
         </div>
 
         <div className="mt-4 rounded-md bg-slate-800 p-3 text-xs text-slate-300">
+          <div className="mb-2 font-semibold">Calculadora elétrica (NBR 5410 base)</div>
+          <div className="mb-2 grid grid-cols-2 gap-2">
+            <label className="text-[11px]">
+              Carga (W)
+              <input
+                type="number"
+                value={calcWatts}
+                onChange={(e) => setCalcWatts(Number(e.target.value))}
+                className="mt-1 w-full rounded bg-slate-700 px-2 py-1 text-xs"
+              />
+            </label>
+            <label className="text-[11px]">
+              Distância (m)
+              <input
+                type="number"
+                value={calcDistance}
+                onChange={(e) => setCalcDistance(Number(e.target.value))}
+                className="mt-1 w-full rounded bg-slate-700 px-2 py-1 text-xs"
+              />
+            </label>
+          </div>
+          <div className="mb-2 grid grid-cols-2 gap-2">
+            <label className="text-[11px]">
+              Tensão
+              <select
+                value={calcVoltage}
+                onChange={(e) => setCalcVoltage(Number(e.target.value))}
+                className="mt-1 w-full rounded bg-slate-700 px-2 py-1 text-xs"
+              >
+                <option value={127}>127V</option>
+                <option value={220}>220V</option>
+              </select>
+            </label>
+            <label className="text-[11px]">
+              Método
+              <select
+                value={calcMethod}
+                onChange={(e) => setCalcMethod(e.target.value as InstallationMethod)}
+                className="mt-1 w-full rounded bg-slate-700 px-2 py-1 text-xs"
+              >
+                <option value="A1">A1</option>
+                <option value="A2">A2</option>
+                <option value="B1">B1</option>
+                <option value="B2">B2</option>
+                <option value="C">C</option>
+              </select>
+            </label>
+          </div>
+          <label className="text-[11px]">
+            Material
+            <select
+              value={calcMaterial}
+              onChange={(e) => setCalcMaterial(e.target.value as MaterialType)}
+              className="mt-1 w-full rounded bg-slate-700 px-2 py-1 text-xs"
+            >
+              <option value="copper">Cobre</option>
+              <option value="aluminum">Alumínio</option>
+            </select>
+          </label>
+          <div className="mt-3 rounded bg-slate-700/70 p-2 text-[11px]">
+            <div>Corrente estimada: {calcResult.currentA.toFixed(2)} A</div>
+            <div>Bitola sugerida: {calcResult.sectionMm2.toFixed(1)} mm²</div>
+            <div>Disjuntor sugerido: {calcResult.breakerA} A</div>
+            <div>Queda de tensão: {calcResult.voltageDropPercent.toFixed(2)}%</div>
+          </div>
+        </div>
+
+        <div className="mt-4 rounded-md bg-slate-800 p-3 text-xs text-slate-300">
+          <div className="mb-1">
+            <strong>Zoom:</strong> {zoomPercent}%
+          </div>
           <strong>Status:</strong> {status}
         </div>
       </aside>
 
-      <main className="flex-1 overflow-hidden rounded-xl bg-white p-2">
-        <canvas ref={canvasEl} />
+      <main className="flex-1 overflow-auto rounded-xl bg-white p-2">
+        <div
+          onDragOver={(event) => event.preventDefault()}
+          onDrop={onDropSymbol}
+          className="h-full min-h-[700px] min-w-[1200px]"
+        >
+          <canvas ref={canvasEl} />
+        </div>
       </main>
     </div>
   )
