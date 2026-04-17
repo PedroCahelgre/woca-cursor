@@ -20,6 +20,7 @@ const MATERIAL_LABEL: Record<SymbolKind, string> = {
   switch: 'Interruptor simples',
   lamp: 'Ponto de luz',
 }
+const METER_PER_GRID = 0.1
 
 const inBounds = (p: GridPoint, cols: number, rows: number) =>
   p.x >= 0 && p.y >= 0 && p.x < cols && p.y < rows
@@ -186,6 +187,7 @@ function App() {
   const [calcVoltage, setCalcVoltage] = useState(220)
   const [calcMethod, setCalcMethod] = useState<InstallationMethod>('B1')
   const [calcMaterial, setCalcMaterial] = useState<MaterialType>('copper')
+  const fileInputRef = useRef<HTMLInputElement | null>(null)
   const calculator = useMemo(() => new ElectricalCalculator(), [])
 
   const calcResult = useMemo(
@@ -334,6 +336,16 @@ function App() {
     setStatus('Projeto limpo.')
   }
 
+  const resetView = () => {
+    const canvas = canvasRef.current
+    if (!canvas) return
+    canvas.setViewportTransform([1, 0, 0, 1, 0, 0])
+    canvas.setZoom(1)
+    setZoomPercent(100)
+    canvas.requestRenderAll()
+    setStatus('Visualização resetada.')
+  }
+
   const addSymbol = (kind: SymbolKind) => {
     const canvas = canvasRef.current
     if (!canvas) return
@@ -393,6 +405,15 @@ function App() {
       return
     }
 
+    const ductLengthMeters = (path.length - 1) * METER_PER_GRID
+    const routeSizing = calculator.calculateFromPower({
+      powerWatts: calcWatts,
+      distanceMeters: Math.max(1, Number(ductLengthMeters.toFixed(2))),
+      voltage: calcVoltage,
+      installationMethod: calcMethod,
+      material: calcMaterial,
+    })
+
     for (let i = 0; i < path.length - 1; i += 1) {
       const from = path[i]
       const to = path[i + 1]
@@ -403,7 +424,25 @@ function App() {
       duct.set('isDuct', true)
       canvas.add(duct)
     }
-    setStatus(`Conexão criada com ${path.length - 1} segmentos.`)
+
+    const mid = path[Math.floor(path.length / 2)]
+    const sizingLabel = new Text(
+      `${routeSizing.sectionMm2.toFixed(1)} mm2 | DJ ${routeSizing.breakerA} A | ${ductLengthMeters.toFixed(1)} m`,
+      {
+        left: mid.x * GRID + 8,
+        top: mid.y * GRID - 14,
+        fontSize: 12,
+        fill: '#065f46',
+        selectable: false,
+        evented: false,
+      },
+    )
+    sizingLabel.set('isDuctLabel', true)
+    canvas.add(sizingLabel)
+
+    setStatus(
+      `Conexão criada com ${path.length - 1} segmentos. Bitola: ${routeSizing.sectionMm2.toFixed(1)} mm2.`,
+    )
     canvas.renderAll()
   }
 
@@ -419,9 +458,23 @@ function App() {
         counts[kind] = (counts[kind] ?? 0) + 1
       })
 
+    const ductLengthMeters = canvas
+      .getObjects()
+      .filter((o) => o.get('isDuct'))
+      .reduce((acc, obj) => {
+        const duct = obj as Line
+        const x1 = Number(duct.x1 ?? 0)
+        const y1 = Number(duct.y1 ?? 0)
+        const x2 = Number(duct.x2 ?? 0)
+        const y2 = Number(duct.y2 ?? 0)
+        const px = Math.hypot(x2 - x1, y2 - y1)
+        return acc + (px / GRID) * METER_PER_GRID
+      }, 0)
+
     const payload = {
       generatedAt: new Date().toISOString(),
       project: 'WOCA Cursor Clone',
+      conduitLengthMeters: Number(ductLengthMeters.toFixed(2)),
       materials: Object.entries(counts).map(([kind, total]) => ({
         code: kind,
         description: MATERIAL_LABEL[kind as SymbolKind] ?? kind,
@@ -437,6 +490,37 @@ function App() {
     a.click()
     URL.revokeObjectURL(url)
     setStatus('Lista de materiais exportada em JSON.')
+  }
+
+  const saveProject = () => {
+    const canvas = canvasRef.current
+    if (!canvas) return
+    const json = canvas.toObject([
+      'isWall',
+      'isDuct',
+      'isDuctLabel',
+      'isElectricalPoint',
+      'symbolKind',
+    ])
+    const blob = new Blob([JSON.stringify(json, null, 2)], { type: 'application/json' })
+    const url = URL.createObjectURL(blob)
+    const a = document.createElement('a')
+    a.href = url
+    a.download = 'woca-projeto.json'
+    a.click()
+    URL.revokeObjectURL(url)
+    setStatus('Projeto salvo em JSON.')
+  }
+
+  const loadProjectFromFile = async (file: File) => {
+    const canvas = canvasRef.current
+    if (!canvas) return
+    const text = await file.text()
+    const parsed = JSON.parse(text)
+    await canvas.loadFromJSON(parsed)
+    canvas.renderAll()
+    setSelectedNodes([])
+    setStatus('Projeto carregado com sucesso.')
   }
 
   const exportPdf = () => {
@@ -520,10 +604,39 @@ function App() {
           <button onClick={exportMaterials} className="w-full rounded-md bg-indigo-600 px-3 py-2 text-sm">
             Exportar materiais JSON
           </button>
+          <button onClick={saveProject} className="w-full rounded-md bg-violet-600 px-3 py-2 text-sm">
+            Salvar projeto JSON
+          </button>
+          <button
+            onClick={() => fileInputRef.current?.click()}
+            className="w-full rounded-md bg-cyan-700 px-3 py-2 text-sm"
+          >
+            Abrir projeto JSON
+          </button>
+          <button onClick={resetView} className="w-full rounded-md bg-slate-600 px-3 py-2 text-sm">
+            Resetar visualização
+          </button>
           <button onClick={clearAll} className="w-full rounded-md bg-rose-700 px-3 py-2 text-sm">
             Limpar projeto
           </button>
         </div>
+        <input
+          ref={fileInputRef}
+          type="file"
+          accept="application/json"
+          className="hidden"
+          onChange={async (e) => {
+            const file = e.target.files?.[0]
+            if (!file) return
+            try {
+              await loadProjectFromFile(file)
+            } catch {
+              setStatus('Falha ao carregar JSON do projeto.')
+            } finally {
+              e.target.value = ''
+            }
+          }}
+        />
 
         <div className="mt-4 rounded-md bg-slate-800 p-3 text-xs text-slate-300">
           <div className="mb-2 font-semibold">Calculadora elétrica (NBR 5410 base)</div>
