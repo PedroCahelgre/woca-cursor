@@ -6,11 +6,11 @@ import {
   type InstallationMethod,
   type MaterialType,
 } from './services/electricalCalculator'
+import { drawLineOnGrid, pointKey, runAStar, type GridPoint } from './services/pathfinding'
 import { SYMBOL_SVG_LIBRARY } from './data/symbolLibrary'
 import type { SymbolKind } from './types/symbols'
 
 type Tool = 'select' | 'wall' | 'connect'
-type GridPoint = { x: number; y: number }
 
 const GRID = 40
 const WORKSPACE = 4000
@@ -24,101 +24,8 @@ const MATERIAL_LABEL: Record<SymbolKind, string> = {
 const METER_PER_GRID = 0.1
 const DEFAULT_CIRCUIT = 'C1'
 
-const inBounds = (p: GridPoint, cols: number, rows: number) =>
-  p.x >= 0 && p.y >= 0 && p.x < cols && p.y < rows
-
-function key(p: GridPoint) {
-  return `${p.x}:${p.y}`
-}
-
 function toGridPoint(x: number, y: number): GridPoint {
   return { x: Math.round(x / GRID), y: Math.round(y / GRID) }
-}
-
-function drawLineOnGrid(start: GridPoint, end: GridPoint, blocked: Set<string>) {
-  let x0 = start.x
-  let y0 = start.y
-  const x1 = end.x
-  const y1 = end.y
-
-  const dx = Math.abs(x1 - x0)
-  const dy = Math.abs(y1 - y0)
-  const sx = x0 < x1 ? 1 : -1
-  const sy = y0 < y1 ? 1 : -1
-  let err = dx - dy
-
-  while (true) {
-    blocked.add(key({ x: x0, y: y0 }))
-    if (x0 === x1 && y0 === y1) break
-    const e2 = 2 * err
-    if (e2 > -dy) {
-      err -= dy
-      x0 += sx
-    }
-    if (e2 < dx) {
-      err += dx
-      y0 += sy
-    }
-  }
-}
-
-function runAStar(
-  start: GridPoint,
-  goal: GridPoint,
-  blocked: Set<string>,
-  cols: number,
-  rows: number,
-): GridPoint[] {
-  const open = new Set<string>([key(start)])
-  const cameFrom = new Map<string, string>()
-  const gScore = new Map<string, number>([[key(start), 0]])
-  const fScore = new Map<string, number>([
-    [key(start), Math.abs(start.x - goal.x) + Math.abs(start.y - goal.y)],
-  ])
-  const nodeByKey = new Map<string, GridPoint>([[key(start), start]])
-  const neighbors = [
-    { x: 1, y: 0 },
-    { x: -1, y: 0 },
-    { x: 0, y: 1 },
-    { x: 0, y: -1 },
-  ]
-
-  while (open.size > 0) {
-    const currentKey = [...open].sort((a, b) => (fScore.get(a) ?? Infinity) - (fScore.get(b) ?? Infinity))[0]
-    const current = nodeByKey.get(currentKey)
-    if (!current) break
-
-    if (current.x === goal.x && current.y === goal.y) {
-      const route: GridPoint[] = [goal]
-      let cursor = currentKey
-      while (cameFrom.has(cursor)) {
-        const prevKey = cameFrom.get(cursor)!
-        const [x, y] = prevKey.split(':').map(Number)
-        route.push({ x, y })
-        cursor = prevKey
-      }
-      return route.reverse()
-    }
-
-    open.delete(currentKey)
-
-    for (const n of neighbors) {
-      const next = { x: current.x + n.x, y: current.y + n.y }
-      const nextKey = key(next)
-      if (!inBounds(next, cols, rows) || blocked.has(nextKey)) continue
-      const tentative = (gScore.get(currentKey) ?? Infinity) + 1
-
-      if (tentative < (gScore.get(nextKey) ?? Infinity)) {
-        cameFrom.set(nextKey, currentKey)
-        gScore.set(nextKey, tentative)
-        fScore.set(nextKey, tentative + Math.abs(next.x - goal.x) + Math.abs(next.y - goal.y))
-        nodeByKey.set(nextKey, next)
-        open.add(nextKey)
-      }
-    }
-  }
-
-  return []
 }
 
 function createFallbackSymbol(kind: SymbolKind, x: number, y: number) {
@@ -236,6 +143,7 @@ function App() {
   const [activeCircuit, setActiveCircuit] = useState(DEFAULT_CIRCUIT)
   const fileInputRef = useRef<HTMLInputElement | null>(null)
   const symbolImportRef = useRef<HTMLInputElement | null>(null)
+  const symbolBatchImportRef = useRef<HTMLInputElement | null>(null)
   const [customSvgByKind, setCustomSvgByKind] = useState<Partial<Record<SymbolKind, string>>>({})
   const [importKind, setImportKind] = useState<SymbolKind>('socket')
   const calculator = useMemo(() => new ElectricalCalculator(), [])
@@ -454,8 +362,8 @@ function App() {
         drawLineOnGrid(toGridPoint(x1, y1), toGridPoint(x2, y2), blocked)
       })
 
-    blocked.delete(key(start))
-    blocked.delete(key(end))
+    blocked.delete(pointKey(start))
+    blocked.delete(pointKey(end))
     const path = runAStar(start, end, blocked, WORKSPACE / GRID + 1, WORKSPACE / GRID + 1)
 
     if (!path.length) {
@@ -665,6 +573,102 @@ function App() {
     setStatus(`SVG personalizado importado para ${MATERIAL_LABEL[kind]}.`)
   }
 
+  const inferSymbolKindFromName = (name: string): SymbolKind | null => {
+    const n = name.toLowerCase()
+    if (n.includes('tomada') || n.includes('socket')) return 'socket'
+    if (n.includes('interruptor') || n.includes('switch')) return 'switch'
+    if (n.includes('lamp') || n.includes('lumin') || n.includes('luz')) return 'lamp'
+    return null
+  }
+
+  const importBatchSymbols = async (files: FileList) => {
+    let imported = 0
+    for (const file of Array.from(files)) {
+      const kind = inferSymbolKindFromName(file.name)
+      if (!kind) continue
+      const text = await file.text()
+      if (!text.includes('<svg')) continue
+      setCustomSvgByKind((prev) => ({ ...prev, [kind]: text }))
+      imported += 1
+    }
+    setStatus(imported > 0 ? `${imported} símbolo(s) importados em lote.` : 'Nenhum SVG válido identificado no lote.')
+  }
+
+  const getCircuitSummary = () => {
+    const canvas = canvasRef.current
+    const byCircuit: Record<string, { points: number; estimatedPowerW: number }> = {}
+    if (!canvas) return byCircuit
+
+    canvas
+      .getObjects()
+      .filter((o) => o.get('isElectricalPoint'))
+      .forEach((o) => {
+        const circuit = String(o.get('circuitId') ?? DEFAULT_CIRCUIT)
+        const kind = String(o.get('symbolKind'))
+        if (!byCircuit[circuit]) byCircuit[circuit] = { points: 0, estimatedPowerW: 0 }
+        byCircuit[circuit].points += 1
+        byCircuit[circuit].estimatedPowerW += kind === 'lamp' ? 100 : kind === 'socket' ? 600 : 200
+      })
+    return byCircuit
+  }
+
+  const exportMemorial = () => {
+    const byCircuit = getCircuitSummary()
+    const memorial = Object.entries(byCircuit).map(([id, info]) => {
+      const sizing = calculator.calculateFromPower({
+        powerWatts: info.estimatedPowerW,
+        distanceMeters: Math.max(10, info.points * 2),
+        voltage: calcVoltage,
+        installationMethod: calcMethod,
+        material: calcMaterial,
+      })
+      return {
+        circuit: id,
+        points: info.points,
+        estimatedPowerW: info.estimatedPowerW,
+        currentA: Number(sizing.currentA.toFixed(2)),
+        sectionMm2: sizing.sectionMm2,
+        breakerA: sizing.breakerA,
+      }
+    })
+
+    const payload = {
+      generatedAt: new Date().toISOString(),
+      project: 'WOCA Cursor Clone',
+      standardReference: 'NBR 5410 (base simplificada)',
+      installationMethod: calcMethod,
+      voltage: calcVoltage,
+      material: calcMaterial,
+      circuits: memorial,
+    }
+
+    const blob = new Blob([JSON.stringify(payload, null, 2)], { type: 'application/json' })
+    const url = URL.createObjectURL(blob)
+    const a = document.createElement('a')
+    a.href = url
+    a.download = 'memorial-descritivo.json'
+    a.click()
+    URL.revokeObjectURL(url)
+
+    const pdf = new jsPDF({ unit: 'pt', format: 'a4' })
+    pdf.setFontSize(14)
+    pdf.text('Memorial Descritivo - WOCA Clone', 40, 50)
+    pdf.setFontSize(10)
+    pdf.text(`Referencia: NBR 5410 (base simplificada)`, 40, 70)
+    pdf.text(`Tensao: ${calcVoltage}V | Metodo: ${calcMethod} | Material: ${calcMaterial}`, 40, 85)
+    let y = 110
+    memorial.forEach((item) => {
+      pdf.text(
+        `${item.circuit}: ${item.points} pontos | ${item.estimatedPowerW}W | ${item.currentA}A | ${item.sectionMm2}mm2 | DJ ${item.breakerA}A`,
+        40,
+        y,
+      )
+      y += 16
+    })
+    pdf.save('memorial-descritivo.pdf')
+    setStatus('Memorial descritivo exportado (JSON e PDF).')
+  }
+
   const onDropSymbol = async (event: React.DragEvent<HTMLDivElement>) => {
     event.preventDefault()
     const kind = event.dataTransfer.getData('symbol-kind') as SymbolKind
@@ -747,6 +751,12 @@ function App() {
               >
                 Importar
               </button>
+              <button
+                onClick={() => symbolBatchImportRef.current?.click()}
+                className="rounded bg-sky-900 px-2 py-1 text-xs"
+              >
+                Lote
+              </button>
             </div>
           </div>
           <p className="mt-2 text-[11px] text-slate-400">
@@ -769,6 +779,9 @@ function App() {
           </button>
           <button onClick={exportLoadPanel} className="w-full rounded-md bg-fuchsia-700 px-3 py-2 text-sm">
             Exportar quadro de cargas
+          </button>
+          <button onClick={exportMemorial} className="w-full rounded-md bg-emerald-800 px-3 py-2 text-sm">
+            Exportar memorial (JSON/PDF)
           </button>
           <button onClick={saveProject} className="w-full rounded-md bg-violet-600 px-3 py-2 text-sm">
             Salvar projeto JSON
@@ -813,6 +826,22 @@ function App() {
             if (!file) return
             try {
               await importCustomSymbol(file, importKind)
+            } finally {
+              e.target.value = ''
+            }
+          }}
+        />
+        <input
+          ref={symbolBatchImportRef}
+          type="file"
+          accept=".svg,image/svg+xml"
+          multiple
+          className="hidden"
+          onChange={async (e) => {
+            const files = e.target.files
+            if (!files || files.length === 0) return
+            try {
+              await importBatchSymbols(files)
             } finally {
               e.target.value = ''
             }
