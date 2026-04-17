@@ -14,6 +14,7 @@ Base para clone do WOCA com:
 - Importação de SVG personalizado para símbolos
 - Importação em lote de SVG por nome de arquivo
 - Memorial descritivo em JSON e PDF
+- Templates prontos de projeto (planta inicial com um clique)
 
 ## Rodar localmente
 
@@ -39,6 +40,7 @@ npm run dev
 - Importação de biblioteca SVG por tipo de símbolo (tomada/interruptor/lâmpada)
 - Importação em lote (`socket/tomada`, `switch/interruptor`, `lamp/luz`) por nome do arquivo
 - Exportação de memorial descritivo (`memorial-descritivo.json` e `memorial-descritivo.pdf`)
+- Aplicação de templates iniciais de planta (residencial/comercial)
 
 ## Estrutura de fases (seu roteiro)
 

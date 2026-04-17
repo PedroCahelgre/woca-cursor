@@ -8,6 +8,7 @@ import {
 } from './services/electricalCalculator'
 import { drawLineOnGrid, pointKey, runAStar, type GridPoint } from './services/pathfinding'
 import { SYMBOL_SVG_LIBRARY } from './data/symbolLibrary'
+import { PROJECT_TEMPLATES } from './data/projectTemplates'
 import type { SymbolKind } from './types/symbols'
 
 type Tool = 'select' | 'wall' | 'connect'
@@ -146,6 +147,7 @@ function App() {
   const symbolBatchImportRef = useRef<HTMLInputElement | null>(null)
   const [customSvgByKind, setCustomSvgByKind] = useState<Partial<Record<SymbolKind, string>>>({})
   const [importKind, setImportKind] = useState<SymbolKind>('socket')
+  const [templateKey, setTemplateKey] = useState<keyof typeof PROJECT_TEMPLATES>('apartment_basic')
   const calculator = useMemo(() => new ElectricalCalculator(), [])
 
   const calcResult = useMemo(
@@ -302,6 +304,32 @@ function App() {
     setZoomPercent(100)
     canvas.requestRenderAll()
     setStatus('Visualização resetada.')
+  }
+
+  const applyTemplate = async () => {
+    const canvas = canvasRef.current
+    if (!canvas) return
+    const template = PROJECT_TEMPLATES[templateKey]
+    clearAll()
+
+    for (const wallData of template.walls) {
+      const wall = new Line([wallData.x1, wallData.y1, wallData.x2, wallData.y2], {
+        stroke: '#374151',
+        strokeWidth: 6,
+        selectable: true,
+      })
+      wall.set('isWall', true)
+      canvas.add(wall)
+    }
+
+    for (const sym of template.symbols) {
+      const svgSource = customSvgByKind[sym.kind] ?? SYMBOL_SVG_LIBRARY[sym.kind]
+      const symbol = await createSymbolFromSvg(sym.kind, svgSource, sym.x, sym.y, sym.circuitId)
+      canvas.add(symbol)
+    }
+    setActiveCircuit(template.symbols[0]?.circuitId ?? DEFAULT_CIRCUIT)
+    canvas.requestRenderAll()
+    setStatus(`Template aplicado: ${template.name}.`)
   }
 
   const addSymbol = async (kind: SymbolKind) => {
@@ -710,6 +738,23 @@ function App() {
         </div>
 
         <div className="mb-4 rounded-md bg-slate-800 p-3">
+          <h2 className="mb-2 text-sm font-semibold">Templates</h2>
+          <div className="mb-3 flex gap-2">
+            <select
+              value={templateKey}
+              onChange={(e) => setTemplateKey(e.target.value as keyof typeof PROJECT_TEMPLATES)}
+              className="w-full rounded bg-slate-700 px-2 py-1 text-xs"
+            >
+              {Object.entries(PROJECT_TEMPLATES).map(([key, tpl]) => (
+                <option key={key} value={key}>
+                  {tpl.name}
+                </option>
+              ))}
+            </select>
+            <button onClick={applyTemplate} className="rounded bg-teal-700 px-2 py-1 text-xs">
+              Aplicar
+            </button>
+          </div>
           <h2 className="mb-2 text-sm font-semibold">Paleta de símbolos</h2>
           <label className="mb-2 block text-[11px] text-slate-300">
             Circuito ativo
