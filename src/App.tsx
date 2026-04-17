@@ -1,14 +1,15 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
-import { Canvas, Circle, Group, Line, Rect, Text } from 'fabric'
+import { Canvas, Circle, Group, Line, Rect, Text, loadSVGFromString } from 'fabric'
 import jsPDF from 'jspdf'
 import {
   ElectricalCalculator,
   type InstallationMethod,
   type MaterialType,
 } from './services/electricalCalculator'
+import { SYMBOL_SVG_LIBRARY } from './data/symbolLibrary'
+import type { SymbolKind } from './types/symbols'
 
 type Tool = 'select' | 'wall' | 'connect'
-type SymbolKind = 'socket' | 'switch' | 'lamp'
 type GridPoint = { x: number; y: number }
 
 const GRID = 40
@@ -21,6 +22,7 @@ const MATERIAL_LABEL: Record<SymbolKind, string> = {
   lamp: 'Ponto de luz',
 }
 const METER_PER_GRID = 0.1
+const DEFAULT_CIRCUIT = 'C1'
 
 const inBounds = (p: GridPoint, cols: number, rows: number) =>
   p.x >= 0 && p.y >= 0 && p.x < cols && p.y < rows
@@ -119,7 +121,7 @@ function runAStar(
   return []
 }
 
-function createSymbol(kind: SymbolKind, x: number, y: number) {
+function createFallbackSymbol(kind: SymbolKind, x: number, y: number) {
   const base = new Circle({
     radius: 18,
     fill: '#dbeafe',
@@ -171,6 +173,45 @@ function createSymbol(kind: SymbolKind, x: number, y: number) {
   return group
 }
 
+async function createSymbol(kind: SymbolKind, x: number, y: number, circuitId: string) {
+  try {
+    const svg = SYMBOL_SVG_LIBRARY[kind]
+    const parsed = await loadSVGFromString(svg)
+    const objects = parsed.objects.filter((obj): obj is NonNullable<typeof obj> => obj !== null)
+    const group = new Group(objects, {
+      left: x,
+      top: y,
+      originX: 'center',
+      originY: 'center',
+      lockScalingFlip: true,
+      scaleX: 0.8,
+      scaleY: 0.8,
+    })
+    const label = new Text(`${kind.toUpperCase()} ${circuitId}`, {
+      fontSize: 8,
+      top: 26,
+      originX: 'center',
+      originY: 'center',
+      fill: '#111827',
+    })
+    const wrapper = new Group([group, label], {
+      left: x,
+      top: y,
+      originX: 'center',
+      originY: 'center',
+      lockScalingFlip: true,
+    })
+    wrapper.set('symbolKind', kind)
+    wrapper.set('isElectricalPoint', true)
+    wrapper.set('circuitId', circuitId)
+    return wrapper
+  } catch {
+    const fallback = createFallbackSymbol(kind, x, y)
+    fallback.set('circuitId', circuitId)
+    return fallback
+  }
+}
+
 function App() {
   const canvasEl = useRef<HTMLCanvasElement | null>(null)
   const canvasRef = useRef<Canvas | null>(null)
@@ -187,6 +228,7 @@ function App() {
   const [calcVoltage, setCalcVoltage] = useState(220)
   const [calcMethod, setCalcMethod] = useState<InstallationMethod>('B1')
   const [calcMaterial, setCalcMaterial] = useState<MaterialType>('copper')
+  const [activeCircuit, setActiveCircuit] = useState(DEFAULT_CIRCUIT)
   const fileInputRef = useRef<HTMLInputElement | null>(null)
   const calculator = useMemo(() => new ElectricalCalculator(), [])
 
@@ -346,14 +388,19 @@ function App() {
     setStatus('Visualização resetada.')
   }
 
-  const addSymbol = (kind: SymbolKind) => {
+  const addSymbol = async (kind: SymbolKind) => {
     const canvas = canvasRef.current
     if (!canvas) return
     const center = canvas.getCenterPoint()
-    const symbol = createSymbol(kind, Math.round(center.x / GRID) * GRID, Math.round(center.y / GRID) * GRID)
+    const symbol = await createSymbol(
+      kind,
+      Math.round(center.x / GRID) * GRID,
+      Math.round(center.y / GRID) * GRID,
+      activeCircuit,
+    )
     canvas.add(symbol)
     canvas.setActiveObject(symbol)
-    setStatus(`${MATERIAL_LABEL[kind]} adicionada.`)
+    setStatus(`${MATERIAL_LABEL[kind]} adicionada no circuito ${activeCircuit}.`)
     canvas.requestRenderAll()
   }
 
@@ -378,6 +425,7 @@ function App() {
     }
 
     const [a, b] = selectedNodes
+    const routeCircuit = String(a.get('circuitId') ?? activeCircuit)
     const aCenter = a.getCenterPoint()
     const bCenter = b.getCenterPoint()
     const start = toGridPoint(aCenter.x, aCenter.y)
@@ -427,7 +475,7 @@ function App() {
 
     const mid = path[Math.floor(path.length / 2)]
     const sizingLabel = new Text(
-      `${routeSizing.sectionMm2.toFixed(1)} mm2 | DJ ${routeSizing.breakerA} A | ${ductLengthMeters.toFixed(1)} m`,
+      `${routeCircuit}: ${routeSizing.sectionMm2.toFixed(1)} mm2 | DJ ${routeSizing.breakerA} A | ${ductLengthMeters.toFixed(1)} m`,
       {
         left: mid.x * GRID + 8,
         top: mid.y * GRID - 14,
@@ -438,10 +486,11 @@ function App() {
       },
     )
     sizingLabel.set('isDuctLabel', true)
+    sizingLabel.set('circuitId', routeCircuit)
     canvas.add(sizingLabel)
 
     setStatus(
-      `Conexão criada com ${path.length - 1} segmentos. Bitola: ${routeSizing.sectionMm2.toFixed(1)} mm2.`,
+      `Conexão ${routeCircuit} criada com ${path.length - 1} segmentos. Bitola: ${routeSizing.sectionMm2.toFixed(1)} mm2.`,
     )
     canvas.renderAll()
   }
@@ -450,12 +499,17 @@ function App() {
     const canvas = canvasRef.current
     if (!canvas) return
     const counts: Record<string, number> = {}
+    const byCircuit: Record<string, { points: number; estimatedPowerW: number }> = {}
     canvas
       .getObjects()
       .filter((o) => o.get('isElectricalPoint'))
       .forEach((o) => {
         const kind = String(o.get('symbolKind'))
         counts[kind] = (counts[kind] ?? 0) + 1
+        const circuit = String(o.get('circuitId') ?? DEFAULT_CIRCUIT)
+        if (!byCircuit[circuit]) byCircuit[circuit] = { points: 0, estimatedPowerW: 0 }
+        byCircuit[circuit].points += 1
+        byCircuit[circuit].estimatedPowerW += kind === 'lamp' ? 100 : kind === 'socket' ? 600 : 200
       })
 
     const ductLengthMeters = canvas
@@ -475,6 +529,11 @@ function App() {
       generatedAt: new Date().toISOString(),
       project: 'WOCA Cursor Clone',
       conduitLengthMeters: Number(ductLengthMeters.toFixed(2)),
+      circuits: Object.entries(byCircuit).map(([id, info]) => ({
+        id,
+        points: info.points,
+        estimatedPowerW: info.estimatedPowerW,
+      })),
       materials: Object.entries(counts).map(([kind, total]) => ({
         code: kind,
         description: MATERIAL_LABEL[kind as SymbolKind] ?? kind,
@@ -492,6 +551,50 @@ function App() {
     setStatus('Lista de materiais exportada em JSON.')
   }
 
+  const exportLoadPanel = () => {
+    const canvas = canvasRef.current
+    if (!canvas) return
+    const byCircuit: Record<string, { points: number; estimatedPowerW: number }> = {}
+    canvas
+      .getObjects()
+      .filter((o) => o.get('isElectricalPoint'))
+      .forEach((o) => {
+        const circuit = String(o.get('circuitId') ?? DEFAULT_CIRCUIT)
+        const kind = String(o.get('symbolKind'))
+        if (!byCircuit[circuit]) byCircuit[circuit] = { points: 0, estimatedPowerW: 0 }
+        byCircuit[circuit].points += 1
+        byCircuit[circuit].estimatedPowerW += kind === 'lamp' ? 100 : kind === 'socket' ? 600 : 200
+      })
+
+    const panel = Object.entries(byCircuit).map(([id, info]) => {
+      const sizing = calculator.calculateFromPower({
+        powerWatts: info.estimatedPowerW,
+        distanceMeters: Math.max(10, info.points * 2),
+        voltage: calcVoltage,
+        installationMethod: calcMethod,
+        material: calcMaterial,
+      })
+      return {
+        circuit: id,
+        points: info.points,
+        powerWatts: info.estimatedPowerW,
+        currentA: Number(sizing.currentA.toFixed(2)),
+        sectionMm2: sizing.sectionMm2,
+        breakerA: sizing.breakerA,
+      }
+    })
+
+    const payload = { generatedAt: new Date().toISOString(), panel }
+    const blob = new Blob([JSON.stringify(payload, null, 2)], { type: 'application/json' })
+    const url = URL.createObjectURL(blob)
+    const a = document.createElement('a')
+    a.href = url
+    a.download = 'quadro-cargas.json'
+    a.click()
+    URL.revokeObjectURL(url)
+    setStatus('Quadro de cargas exportado em JSON.')
+  }
+
   const saveProject = () => {
     const canvas = canvasRef.current
     if (!canvas) return
@@ -501,6 +604,7 @@ function App() {
       'isDuctLabel',
       'isElectricalPoint',
       'symbolKind',
+      'circuitId',
     ])
     const blob = new Blob([JSON.stringify(json, null, 2)], { type: 'application/json' })
     const url = URL.createObjectURL(blob)
@@ -534,21 +638,22 @@ function App() {
     setStatus('PDF exportado com sucesso.')
   }
 
-  const onDropSymbol = (event: React.DragEvent<HTMLDivElement>) => {
+  const onDropSymbol = async (event: React.DragEvent<HTMLDivElement>) => {
     event.preventDefault()
     const kind = event.dataTransfer.getData('symbol-kind') as SymbolKind
     const canvas = canvasRef.current
     if (!canvas || !kind) return
     const scenePoint = canvas.getScenePoint(event.nativeEvent)
-    const symbol = createSymbol(
+    const symbol = await createSymbol(
       kind,
       Math.round(scenePoint.x / GRID) * GRID,
       Math.round(scenePoint.y / GRID) * GRID,
+      activeCircuit,
     )
     canvas.add(symbol)
     canvas.setActiveObject(symbol)
     canvas.requestRenderAll()
-    setStatus(`${MATERIAL_LABEL[kind]} inserida via arrastar e soltar.`)
+    setStatus(`${MATERIAL_LABEL[kind]} inserida no circuito ${activeCircuit}.`)
   }
 
   return (
@@ -573,6 +678,15 @@ function App() {
 
         <div className="mb-4 rounded-md bg-slate-800 p-3">
           <h2 className="mb-2 text-sm font-semibold">Paleta de símbolos</h2>
+          <label className="mb-2 block text-[11px] text-slate-300">
+            Circuito ativo
+            <input
+              value={activeCircuit}
+              onChange={(e) => setActiveCircuit(e.target.value.toUpperCase())}
+              className="mt-1 w-full rounded bg-slate-700 px-2 py-1 text-xs"
+              placeholder="C1"
+            />
+          </label>
           <div className="grid grid-cols-3 gap-2">
             {(['socket', 'switch', 'lamp'] as SymbolKind[]).map((kind) => (
               <button
@@ -603,6 +717,9 @@ function App() {
           </button>
           <button onClick={exportMaterials} className="w-full rounded-md bg-indigo-600 px-3 py-2 text-sm">
             Exportar materiais JSON
+          </button>
+          <button onClick={exportLoadPanel} className="w-full rounded-md bg-fuchsia-700 px-3 py-2 text-sm">
+            Exportar quadro de cargas
           </button>
           <button onClick={saveProject} className="w-full rounded-md bg-violet-600 px-3 py-2 text-sm">
             Salvar projeto JSON

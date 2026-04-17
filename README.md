@@ -10,6 +10,7 @@ Base para clone do WOCA com:
 - Calculadora elétrica NBR 5410 (base)
 - Exportação de planta em PDF e materiais em JSON
 - Salvamento e abertura de projeto em JSON
+- Circuito ativo por símbolo e quadro de cargas em JSON
 
 ## Rodar localmente
 
@@ -31,6 +32,7 @@ npm run dev
 - Exportação do canvas para `planta-eletrica.pdf`
 - Exportação da lista de materiais para `lista-materiais.json`
 - Salvamento/carregamento do projeto (`woca-projeto.json`)
+- Exportação do quadro de cargas (`quadro-cargas.json`)
 
 ## Estrutura de fases (seu roteiro)
 
